@@ -1,0 +1,241 @@
+module alu_control_unit (
+    input clk,
+    input reset,
+    input start,               
+    input [1:0] opcode, //00=Add,01=Sub,10=Mul,11=Div
+    input [15:0] op1,
+    input [7:0]  op2,
+    
+    output reg [15:0] result,
+    output reg [7:0] quotient,
+    output reg [7:0] remainder,
+    
+    output reg done_all,
+    output reg zero_flag,
+    output reg negative_flag
+);
+
+    // FSM states
+    localparam IDLE       = 3'b000;
+    localparam WAIT_MULT  = 3'b001;
+    localparam WAIT_DIV   = 3'b010;
+    localparam DONE_STATE = 3'b011;
+
+    reg [2:0] state;
+
+    // ---------------- ADD / SUB ----------------
+    wire [7:0] add_sub_A;
+    wire [7:0] add_sub_B;
+    wire add_sub_cin;
+    wire [7:0] sum_out;
+
+    wire is_add_sub = (opcode == 2'b00 || opcode == 2'b01);
+
+    assign add_sub_A = is_add_sub ? op1[7:0] : 8'b0;
+    assign add_sub_B = is_add_sub ? ((opcode == 2'b01) ? ~op2 : op2) : 8'b0;
+    assign add_sub_cin = (opcode == 2'b01);
+
+    alu_cska_8bit adder_unit (
+        .A(add_sub_A),
+        .B(add_sub_B),
+        .cin(add_sub_cin),
+        .S(sum_out),
+        .cout()
+    );
+
+    // ---------------- MULT ----------------
+    reg start_mult;
+    wire done_mult;
+    wire [15:0] mult_out;
+
+    booth_radix4_seq mult_unit (
+        .clk(clk),
+        .rst(reset),
+        .start(start_mult),
+        .M_in(op1[7:0]),
+        .Q_in(op2),
+        .P(mult_out),
+        .done(done_mult),
+        .busy()
+    );
+
+    // ---------------- DIV ----------------
+    reg start_div;
+    wire done_div;
+    wire [7:0] quotient_out, remainder_out;
+
+    non_restoring_divider div_unit (
+        .clk(clk),
+        .reset(reset),
+        .start(start_div),
+        .dividend(op1),
+        .divisor(op2),
+        .quotient(quotient_out),
+        .remainder(remainder_out),
+        .done(done_div)
+    );
+
+    // ---------------- FSM ----------------
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            state <= IDLE;
+            result <= 0;
+            quotient <= 0;
+            remainder <= 0;
+            done_all <= 0;
+            start_mult <= 0;
+            start_div <= 0;
+            zero_flag <= 0;
+            negative_flag <= 0;
+        end else begin
+            case (state)
+
+                IDLE: begin
+                    done_all <= 0;
+                    start_mult <= 0;
+                    start_div <= 0;
+
+                    if (start) begin
+                        case (opcode)
+
+                            // ADD / SUB
+                            2'b00, 2'b01: begin
+                                result <= {8'b0, sum_out};
+                                quotient <= 0;
+                                remainder <= 0;
+
+                                zero_flag <= (sum_out == 0);
+                                negative_flag <= sum_out[7];
+
+                                state <= DONE_STATE;
+                            end
+
+                            // MULT
+                            2'b10: begin
+                                start_mult <= 1;
+                                state <= WAIT_MULT;
+                            end
+
+                            // DIV
+                            2'b11: begin
+                                start_div <= 1;
+                                state <= WAIT_DIV;
+                            end
+
+                        endcase
+                    end
+                end
+
+                WAIT_MULT: begin
+                    start_mult <= 0;
+                    if (done_mult) begin
+                        result <= mult_out;
+                        quotient <= 0;
+                        remainder <= 0;
+
+                        zero_flag <= (mult_out == 0);
+                        negative_flag <= mult_out[15];
+
+                        state <= DONE_STATE;
+                    end
+                end
+
+                WAIT_DIV: begin
+                    start_div <= 0;
+                    if (done_div) begin
+                        quotient <= quotient_out;
+                        remainder <= remainder_out;
+                        result <= {remainder_out, quotient_out};
+
+                        zero_flag <= (quotient_out == 0);
+                        negative_flag <= quotient_out[7];
+
+                        state <= DONE_STATE;
+                    end
+                end
+
+                DONE_STATE: begin
+                    done_all <= 1;
+                    if (!start) begin
+                        done_all <= 0;
+                        state <= IDLE;
+                    end
+                end
+
+            endcase
+        end
+    end
+
+endmodule
+
+
+
+
+module alu_control_unit_tb();
+
+    reg clk;
+    reg reset;
+    reg start;
+    reg [1:0] opcode;
+    reg [15:0] op1;
+    reg [7:0] op2;
+
+    wire [15:0] result;
+    wire [7:0] quotient;
+    wire [7:0] remainder;
+    wire done_all;
+    wire zero_flag;
+    wire negative_flag;
+
+    alu_control_unit dut (
+        .clk(clk),
+        .reset(reset),
+        .start(start),
+        .opcode(opcode),
+        .op1(op1),
+        .op2(op2),
+        .result(result),
+        .quotient(quotient),
+        .remainder(remainder),
+        .done_all(done_all),
+        .zero_flag(zero_flag),
+        .negative_flag(negative_flag)
+    );
+
+    always #5 clk = ~clk;
+
+    initial begin
+        clk = 0;
+        reset = 1;
+        start = 0;
+
+        #20 reset = 0; #20;
+
+        // ADD
+        @(posedge clk); opcode = 2'b00; op1 = 50; op2 = 20; start = 1;
+        wait(done_all);
+        $display("ADD: %d", $signed(result[7:0]));
+        @(posedge clk); start = 0; wait(!done_all);
+
+        // SUB
+        @(posedge clk); opcode = 2'b01; op1 = 50; op2 = 70; start = 1;
+        wait(done_all);
+        $display("SUB: %d", $signed(result[7:0]));
+        @(posedge clk); start = 0; wait(!done_all);
+
+        // MUL
+        @(posedge clk); opcode = 2'b10; op1 = 12; op2 = 5; start = 1;
+        wait(done_all);
+        $display("MUL: %d", $signed(result));
+        @(posedge clk); start = 0; wait(!done_all);
+
+        // DIV
+        @(posedge clk); opcode = 2'b11; op1 = 100; op2 = 9; start = 1;
+        wait(done_all);
+        $display("DIV: cat=%d rest=%d", quotient, remainder);
+        @(posedge clk); start = 0; wait(!done_all);
+
+        
+    end
+
+endmodule
